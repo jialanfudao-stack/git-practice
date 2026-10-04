@@ -1,5 +1,6 @@
 import ast
 import copy
+import hashlib
 import json
 import threading
 import time
@@ -36,12 +37,16 @@ class NotebookControlsTests(unittest.TestCase):
 
     def test_notebook_schema_and_code_syntax(self):
         nb = json.loads(NOTEBOOK.read_text(encoding='utf-8'))
-        self.assertEqual(len(nb['cells']), 33)
+        self.assertEqual(len(nb['cells']), 35)
+        self.assertEqual(len({cell.get('id') for cell in nb['cells'] if cell.get('id')}), sum(bool(cell.get('id')) for cell in nb['cells']))
+        helper_hash = hashlib.sha256(Path(__file__).with_name('continue_colab_bridge.py').read_bytes()).hexdigest()
+        bridge_cell = ''.join(nb['cells'][34]['source'])
+        self.assertIn(helper_hash, bridge_cell)
         for cell in nb['cells']:
             if cell['cell_type'] == 'markdown':
                 self.assertNotIn('execution_count', cell)
                 self.assertNotIn('outputs', cell)
-        for i in (11, 13, 14, 15, 17, 19, 20, 21):
+        for i in (11, 13, 14, 15, 17, 19, 20, 21, 34):
             source = ''.join(nb['cells'][i].get('source', []))
             compile(source, f'<notebook cell {i}>', 'exec')
 
@@ -129,11 +134,15 @@ class NotebookControlsTests(unittest.TestCase):
             'GPU_INFERENCE_BLOCKED': False,
             '_clear_image_process': clear_image,
             'stop_server': stop_text,
+            'IMAGE_SERVER_PROCESS': object(),
+            'server_process': object(),
             'requests': requests,
             'PRIVATE_ROUTE_BASE_URL': 'http://127.0.0.1:7000',
             'PRIVATE_ROUTE_TOKEN': 'test-token',
             'print': Mock(),
         }
+        clear_image.side_effect = lambda: ns.update(IMAGE_SERVER_PROCESS=None)
+        stop_text.side_effect = lambda: ns.update(server_process=None)
         stop = extract_function(21, 'stop_all_backends', ns)
         lock.acquire()
         stop(None)
@@ -144,6 +153,20 @@ class NotebookControlsTests(unittest.TestCase):
         clear_image.assert_called_once()
         stop_text.assert_called_once()
         self.assertFalse(lock.locked())
+
+    def test_stopping_only_comfy_keeps_uncertain_inference_blocked(self):
+        ns = {
+            'GPU_INFERENCE_LOCK': threading.Lock(),
+            'GPU_INFERENCE_BLOCKED': True,
+            '_clear_image_process': Mock(),
+            'requests': SimpleNamespace(post=Mock()),
+            'PRIVATE_ROUTE_BASE_URL': 'http://127.0.0.1:7000',
+            'PRIVATE_ROUTE_TOKEN': 'test-token',
+            'print': Mock(),
+        }
+        stop_image = extract_function(21, 'stop_image_backend', ns)
+        stop_image()
+        self.assertTrue(ns['GPU_INFERENCE_BLOCKED'])
 
     def test_ui_routes_both_inference_paths_through_the_shared_lock(self):
         chat_tree = ast.parse(''.join(cells()[15]['source']))
