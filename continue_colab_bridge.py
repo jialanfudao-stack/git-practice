@@ -19,8 +19,10 @@ import requests
 
 
 MAX_REQUEST_BYTES = 1_048_576
-MAX_OUTPUT_TOKENS = 512
-CONTINUE_OUTPUT_TOKENS = 128
+MAX_OUTPUT_TOKENS = 1024
+CONTINUE_OUTPUT_TOKENS = 768
+THINKING_BUDGET_TOKENS = 128
+REASONING_BUDGET_MESSAGE = "Thinking budget reached. Stop reasoning and provide a concise answer now."
 CONTEXT_TOKENS = 4096
 PROMPT_SAFETY_TOKENS = 64
 BACKEND_TIMEOUT = (15, 110)
@@ -269,13 +271,16 @@ class ColabContinueBridge:
                     self._error(400, "messages must be a non-empty array")
                     return
                 try:
-                    requested = body.get("max_tokens", body.get("max_completion_tokens", MAX_OUTPUT_TOKENS))
+                    requested = body.get("max_tokens", body.get("max_completion_tokens", CONTINUE_OUTPUT_TOKENS))
                     if isinstance(requested, bool) or not isinstance(requested, int) or requested < 1 or requested > MAX_OUTPUT_TOKENS:
-                        self._error(400, "max_tokens must be between 1 and 512")
+                        self._error(400, "max_tokens must be between 1 and 1024")
                         return
                     body["max_tokens"] = requested
                     body.pop("max_completion_tokens", None)
-                    body["chat_template_kwargs"] = {"enable_thinking": False}
+                    body["reasoning_effort"] = "medium"
+                    body["thinking_budget_tokens"] = THINKING_BUDGET_TOKENS
+                    body["reasoning_budget_message"] = REASONING_BUDGET_MESSAGE
+                    body["chat_template_kwargs"] = {"reasoning_effort": "medium"}
                     if not bridge.gpu_lock.acquire(blocking=False):
                         self._error(409, "GPU inference is busy")
                         return
@@ -305,6 +310,14 @@ class ColabContinueBridge:
                             bridge.mark_blocked()
                             self._error(502, "Backend returned an invalid completion; stop and restart both backends")
                             return
+                        if response.status_code < 400:
+                            choices = decoded.get("choices") if isinstance(decoded, dict) else None
+                            choice = choices[0] if isinstance(choices, list) and choices else None
+                            message = choice.get("message") if isinstance(choice, dict) else None
+                            content = message.get("content") if isinstance(message, dict) else None
+                            if not isinstance(content, str) or not content.strip() or "</think>" in content:
+                                self._error(502, "Backend returned no visible answer within the configured output budget")
+                                return
                         self._send(response.status_code, payload)
                     except requests.RequestException:
                         bridge.mark_blocked()
@@ -318,7 +331,7 @@ class ColabContinueBridge:
                 try:
                     template = bridge.session.post(
                         f"{bridge.base_url}/apply-template",
-                        json={"messages": messages, "chat_template_kwargs": {"enable_thinking": False}},
+                        json={"messages": messages, "reasoning_effort": "medium", "chat_template_kwargs": {"reasoning_effort": "medium"}},
                         timeout=(10, 30),
                     )
                     template.raise_for_status()

@@ -10,7 +10,7 @@ import requests
 from continue_colab_bridge import ColabContinueBridge
 
 
-MODEL = "huihui-qwen38-abliterated-q6kl-gguf"
+MODEL = "ternary-bonsai2-27b-abliterated-pq2-gguf"
 
 
 class BridgeTests(unittest.TestCase):
@@ -20,6 +20,8 @@ class BridgeTests(unittest.TestCase):
         self.block_chat = False
         self.chat_body = None
         self.template_body = None
+        self.response_content = "ok"
+        self.response_payload = None
 
         owner = self
 
@@ -54,7 +56,11 @@ class BridgeTests(unittest.TestCase):
                     owner.chat_entered.set()
                     if owner.block_chat:
                         owner.chat_release.wait(2)
-                    self.send_json(200, {"model": MODEL, "choices": [{"message": {"content": "ok"}}]})
+                    payload = owner.response_payload or {
+                        "model": MODEL,
+                        "choices": [{"message": {"content": owner.response_content}}],
+                    }
+                    self.send_json(200, payload)
                 else:
                     self.send_json(404, {})
 
@@ -91,7 +97,7 @@ class BridgeTests(unittest.TestCase):
         return {"Authorization": f"Bearer {key}"}
 
     def body(self, **changes):
-        value = {"model": MODEL, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 128, "stream": False}
+        value = {"model": MODEL, "messages": [{"role": "user", "content": "hi"}], "stream": False}
         value.update(changes)
         return value
 
@@ -107,20 +113,49 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(bad_model.status_code, 400)
         streaming = self.client.post(self.base + "/chat/completions", headers=self.headers(), json=self.body(stream=True))
         self.assertEqual(streaming.status_code, 400)
-        too_many = self.client.post(self.base + "/chat/completions", headers=self.headers(), json=self.body(max_tokens=513))
+        too_many = self.client.post(self.base + "/chat/completions", headers=self.headers(), json=self.body(max_tokens=1025))
         self.assertEqual(too_many.status_code, 400)
-        result = self.client.post(self.base + "/chat/completions", headers=self.headers(), json=self.body())
+        result = self.client.post(
+            self.base + "/chat/completions",
+            headers=self.headers(),
+            json=self.body(max_tokens=128, reasoning_effort="none", thinking_budget_tokens=-1,
+                           chat_template_kwargs={"enable_thinking": False}),
+        )
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json()["choices"][0]["message"]["content"], "ok")
-        self.assertEqual(self.chat_body["chat_template_kwargs"], {"enable_thinking": False})
-        self.assertEqual(self.template_body["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertEqual(self.chat_body["reasoning_effort"], "medium")
+        self.assertEqual(self.chat_body["thinking_budget_tokens"], 128)
+        self.assertEqual(self.chat_body["chat_template_kwargs"], {"reasoning_effort": "medium"})
+        self.assertEqual(self.template_body["chat_template_kwargs"], {"reasoning_effort": "medium"})
+        self.assertEqual(self.chat_body["max_tokens"], 128)
+        default_result = self.client.post(self.base + "/chat/completions", headers=self.headers(), json=self.body())
+        self.assertEqual(default_result.status_code, 200)
+        self.assertEqual(self.chat_body["max_tokens"], 768)
         with TemporaryDirectory() as directory:
             self.bridge.api_base = "https://example.trycloudflare.com/v1"
             path = self.bridge.write_config(str(Path(directory) / "connection.json"))
             config = json.loads(Path(path).read_text(encoding="utf-8"))
-            self.assertEqual(config["continue"]["yaml"]["defaultCompletionOptions"], {"contextLength": 4096, "maxTokens": 128, "stream": False})
-            self.assertEqual(config["continue"]["json"]["completionOptions"], {"maxTokens": 128, "stream": False})
+            self.assertEqual(config["continue"]["yaml"]["defaultCompletionOptions"], {"contextLength": 4096, "maxTokens": 768, "stream": False})
+            self.assertEqual(config["continue"]["json"]["completionOptions"], {"maxTokens": 768, "stream": False})
             self.assertEqual(config["apiKey"], "test-secret")
+
+    def test_bridge_rejects_empty_or_reasoning_only_visible_content(self):
+        self.response_content = ""
+        empty = self.client.post(self.base + "/chat/completions", headers=self.headers(), json=self.body())
+        self.assertEqual(empty.status_code, 502)
+        self.response_content = "unfinished thought </think>"
+        thought_only = self.client.post(self.base + "/chat/completions", headers=self.headers(), json=self.body())
+        self.assertEqual(thought_only.status_code, 502)
+
+    def test_bridge_rejects_malformed_or_missing_visible_content(self):
+        for payload in (
+            {"model": MODEL, "choices": [None]},
+            {"model": MODEL, "choices": [{"message": {"content": None}}]},
+        ):
+            with self.subTest(payload=payload):
+                self.response_payload = payload
+                result = self.client.post(self.base + "/chat/completions", headers=self.headers(), json=self.body())
+                self.assertEqual(result.status_code, 502)
 
     def test_lock_rejects_overlap_and_context_budget(self):
         self.block_chat = True

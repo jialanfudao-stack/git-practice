@@ -41,14 +41,25 @@ class NotebookControlsTests(unittest.TestCase):
         nb = json.loads(NOTEBOOK.read_text(encoding='utf-8'))
         self.assertEqual(len(nb['cells']), 37)
         self.assertEqual(len({cell.get('id') for cell in nb['cells'] if cell.get('id')}), sum(bool(cell.get('id')) for cell in nb['cells']))
-        helper_hash = hashlib.sha256(Path(__file__).with_name('continue_colab_bridge.py').read_bytes()).hexdigest()
+        helper_bytes = Path(__file__).with_name('continue_colab_bridge.py').read_bytes().replace(b'\r\n', b'\n')
+        helper_hash = hashlib.sha256(helper_bytes).hexdigest()
         rerun_cell = nb['cells'][36]
         rerun_source = ''.join(rerun_cell['source'])
         self.assertEqual(rerun_cell['id'], 'rerun-refresh')
         self.assertIn('# @title 通常再実行', rerun_source.splitlines()[0])
-        self.assertEqual(hashlib.sha256(rerun_source.encode('utf-8')).hexdigest(), '6d3967eb0d44a28e15c337386c479b4943a4a66640a7bf036a7d1acb5ba58729')
+        self.assertEqual(hashlib.sha256(rerun_source.encode('utf-8')).hexdigest(), '2c231f956f06af4d5b921c39241fb3900cbffe37ce1ad62b5f98d32bfde7a722')
         bridge_cell = ''.join(nb['cells'][34]['source'])
         self.assertIn(helper_hash, bridge_cell)
+        self.assertIn("CONTINUE_BRIDGE_SHA256 = '" + helper_hash + "'", bridge_cell)
+        snapshot_bytes = Path(__file__).with_name('colab_refresh_snapshot.json').read_bytes()
+        self.assertIn(hashlib.sha256(snapshot_bytes).hexdigest(), rerun_source)
+        snapshot = json.loads(snapshot_bytes)
+        self.assertEqual(snapshot['model_alias'], 'ternary-bonsai2-27b-abliterated-pq2-gguf')
+        for index in (13, 15, 19, 20, 21, 34):
+            self.assertEqual(snapshot['cells'][str(index)], ''.join(nb['cells'][index]['source']))
+        self.assertIn("REPO_ID = 'Hikari07jp/Ternary-Bonsai-2-27B-Abliterated-GGUF'", ''.join(nb['cells'][6]['source']))
+        self.assertIn("MODEL_REVISION = '187cabcc22baf475832376dd033c6283d309d5f1'", ''.join(nb['cells'][6]['source']))
+        self.assertIn("LLAMA_COMMIT = 'adfffbe41b2cabcd51fff326ab045662265062bb'", ''.join(nb['cells'][7]['source']))
         for cell in nb['cells']:
             if cell['cell_type'] == 'markdown':
                 self.assertNotIn('execution_count', cell)
@@ -75,20 +86,20 @@ class NotebookControlsTests(unittest.TestCase):
             'IMAGE_COMFY_DIR': Path('/mock/ComfyUI'),
             'IMAGE_HOST': '127.0.0.1',
             'BASE_URL': 'http://127.0.0.1:9000',
-            'MODEL_ALIAS': 'text-model',
+            'MODEL_ALIAS': 'ternary-bonsai2-27b-abliterated-pq2-gguf',
             'chat_history': [],
             'PRIVATE_ROUTE_BASE_URL': 'http://127.0.0.1:7000',
             'PRIVATE_ROUTE_TOKEN': 'test-token',
             'create_chat_ui': Mock(return_value=('input', 'send', 'reset', 'output')),
             'widgets': SimpleNamespace(VBox=lambda x: x),
             'display': Mock(),
-            '_huihui_health': Mock(return_value=True),
+            '_bonsai_health': Mock(return_value=True),
         }
         matches = extract_function(20, '_matches_comfy_process', ns)
         self.assertTrue(matches(image_process))
         start_image = extract_function(20, 'start_image_backend', ns)
         self.assertEqual(start_image(), 'http://127.0.0.1:8188')
-        restore_chat = extract_function(21, 'restore_huihui', ns)
+        restore_chat = extract_function(21, 'restore_bonsai', ns)
         restore_chat()
         self.assertIs(ns['server_process'], text_process)
         self.assertIs(ns['IMAGE_SERVER_PROCESS'], image_process)
@@ -189,18 +200,16 @@ class NotebookControlsTests(unittest.TestCase):
     def _run_mocked_rerun_cell(self, *, busy=False, unhealthy=False, missing=False):
         current = json.loads(NOTEBOOK.read_text(encoding='utf-8'))
         source = ''.join(current['cells'][36]['source'])
-        base_nb = subprocess.check_output([
-            'git', 'show', '6c3b6a0450df87f7494718a3f6e693e6adde8c9f:Untitled0.ipynb'
-        ])
-        base_cells = json.loads(base_nb)['cells']
+        snapshot_bytes = Path(__file__).with_name('colab_refresh_snapshot.json').read_bytes()
+        snapshot = json.loads(snapshot_bytes)
         helper_bytes = Path(__file__).with_name('continue_colab_bridge.py').read_bytes()
         lock = threading.Lock()
         if busy:
             lock.acquire()
         history = [{'role': 'user', 'content': 'keep this'}]
         text_proc = SimpleNamespace(pid=101, args=[
-            '/content/qwen38_work/llama.cpp/build/bin/llama-server', '-m',
-            '/content/qwen38_gguf/model.gguf', '--alias', 'text-model'
+            '/content/qwen38_work/llama-prism-b10743/build/bin/llama-server', '-m',
+            '/content/qwen38_gguf/Ternary-Bonsai-2-27B-Abliterated-PQ2_0.gguf', '--alias', 'ternary-bonsai2-27b-abliterated-pq2-gguf'
         ], poll=Mock(return_value=None), terminate=Mock(), wait=Mock())
         image_proc = SimpleNamespace(pid=202, args=[
             'python', '/content/qwen_image_work/ComfyUI/main.py'
@@ -212,10 +221,10 @@ class NotebookControlsTests(unittest.TestCase):
             def __init__(self, url):
                 self.url = url
                 self.status_code = 503 if unhealthy else 200
-                self.content = base_nb if url.endswith('/Untitled0.ipynb') else helper_bytes
+                self.content = snapshot_bytes if url.endswith('/colab_refresh_snapshot.json') else helper_bytes
 
             def json(self):
-                return {'data': [{'id': 'text-model'}]}
+                return {'data': [{'id': 'ternary-bonsai2-27b-abliterated-pq2-gguf'}]}
 
             def raise_for_status(self):
                 if self.status_code != 200:
@@ -270,7 +279,7 @@ class NotebookControlsTests(unittest.TestCase):
             'LLAMA_CTX_SIZE': 4096,
             'chat_history': history,
             'BASE_URL': 'http://text.local',
-            'MODEL_ALIAS': 'text-model',
+            'MODEL_ALIAS': 'ternary-bonsai2-27b-abliterated-pq2-gguf',
             'SERVER_BIN': Path(text_proc.args[0]),
             'model_path': Path(text_proc.args[2]),
             'server_process': text_proc,
@@ -321,7 +330,7 @@ class NotebookControlsTests(unittest.TestCase):
             self.assertFalse(any('huggingface' in url.lower() or '/releases/' in url for url in calls))
             self.assertEqual(executed_cells, [f'<verified-notebook-cell-{i}>' for i in (13, 15, 19, 20, 21)])
             self.assertEqual(len(optional_cell), 1)
-            return calls, namespace, ''.join(base_cells[34]['source'])
+            return calls, namespace, snapshot['cells']['34']
         finally:
             if lock.locked():
                 lock.release()
@@ -334,7 +343,7 @@ class NotebookControlsTests(unittest.TestCase):
 
     def test_rerun_refresh_executes_real_lightweight_cells_and_preserves_runtime_state(self):
         calls, ns, bridge_source = self._run_mocked_rerun_cell()
-        self.assertTrue(any(url.endswith('/Untitled0.ipynb') for url in calls))
+        self.assertTrue(any(url.endswith('/colab_refresh_snapshot.json') for url in calls))
         self.assertTrue(callable(ns['run_gpu_serialized']))
         self.assertTrue(callable(ns['create_chat_ui']))
         self.assertTrue(callable(ns['create_image_ui']))
@@ -347,7 +356,7 @@ class NotebookControlsTests(unittest.TestCase):
         for options in ({'busy': True}, {'unhealthy': True}, {'missing': True}):
             with self.subTest(options=options), self.assertRaises(RuntimeError):
                 self._run_mocked_rerun_cell(**options)
-            self.assertFalse(any(url.endswith('/Untitled0.ipynb') for url in self._last_rerun_calls))
+            self.assertFalse(any(url.endswith('/colab_refresh_snapshot.json') for url in self._last_rerun_calls))
 
 
 if __name__ == '__main__':
