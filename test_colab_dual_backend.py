@@ -39,7 +39,7 @@ class NotebookControlsTests(unittest.TestCase):
 
     def test_notebook_schema_and_code_syntax(self):
         nb = json.loads(NOTEBOOK.read_text(encoding='utf-8'))
-        self.assertEqual(len(nb['cells']), 37)
+        self.assertEqual(len(nb['cells']), 40)
         self.assertEqual(len({cell.get('id') for cell in nb['cells'] if cell.get('id')}), sum(bool(cell.get('id')) for cell in nb['cells']))
         helper_bytes = Path(__file__).with_name('continue_colab_bridge.py').read_bytes().replace(b'\r\n', b'\n')
         helper_hash = hashlib.sha256(helper_bytes).hexdigest()
@@ -64,9 +64,13 @@ class NotebookControlsTests(unittest.TestCase):
             if cell['cell_type'] == 'markdown':
                 self.assertNotIn('execution_count', cell)
                 self.assertNotIn('outputs', cell)
-        for i in (11, 13, 14, 15, 17, 19, 20, 21, 34, 36):
+        for i in (11, 13, 14, 15, 17, 19, 20, 21, 34, 36, 37):
             source = ''.join(nb['cells'][i].get('source', []))
             compile(source, f'<notebook cell {i}>', 'exec')
+        diagnostic_source = ''.join(nb['cells'][37]['source'])
+        self.assertIn("qwen38_gguf/Ternary-Bonsai-2-27B-Abliterated-PQ2_0.gguf", diagnostic_source)
+        self.assertIn("qwen38_work/llama-prism-b10743/build/bin/llama-server", diagnostic_source)
+        self.assertIn("public key={bool(size(image[5]))}", diagnostic_source)
 
     def test_both_backend_processes_and_endpoints_are_retained_when_switching(self):
         text_process = SimpleNamespace(pid=101, poll=lambda: None)
