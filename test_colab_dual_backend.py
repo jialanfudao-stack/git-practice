@@ -24,6 +24,16 @@ def extract_function(cell_index, name, namespace):
 
 
 class NotebookControlsTests(unittest.TestCase):
+    def test_dependency_setup_preserves_colab_constraints_and_checks_loaded_versions(self):
+        source = ''.join(cells()[5]['source'])
+        compile('\n'.join(source.splitlines()[1:]), '<dependency setup cell>', 'exec')
+        self.assertIn('"requests==2.32.4"', source)
+        self.assertIn('"huggingface-hub>=1.23.0,<2.0.0"', source)
+        self.assertNotIn(' -U ', source)
+        self.assertIn('metadata.requires(distribution)', source)
+        self.assertIn('sys.modules.get(module_name)', source)
+        self.assertLess(source.index('from huggingface_hub import HfApi, hf_hub_download'), source.index('依存ライブラリの準備完了'))
+
     def test_notebook_schema_and_code_syntax(self):
         nb = json.loads(NOTEBOOK.read_text(encoding='utf-8'))
         self.assertEqual(len(nb['cells']), 33)
